@@ -1,5 +1,5 @@
 -- ====================================================================
--- HUB DOS RAPAZES - ANIME DUNGEONS (MIRA & ROTAÇÃO RESTAURADAS 100%)
+-- HUB DOS RAPAZES - ANIME DUNGEONS (COM AUTO-SELL & AUTO-FAVORITE)
 -- ====================================================================
 
 -- [[ 1. SINGLETON & BOOTSTRAP ]]
@@ -75,12 +75,10 @@ local SharedState = {
     IsClaiming = false,
     IsDungeonEnded = false,
     HasExecutedSell = false,
-    HasExecutedQuests = false,
     LastRoomState = "Room1",
     CurrentTween = nil,
     CurrentTargetPos = nil,
-    LastPortalAttempt = 0,
-    DetectedWeapon = nil
+    LastPortalAttempt = 0
 }
 
 -- [[ 2. CONFIGURAÇÕES ]]
@@ -101,11 +99,9 @@ ConfigModule.Settings = {
     SkillMaxDistance = 22,
     HeightAboveEnemy = 8.5,
     BackDistance = 6.0,
-    TweenSpeed = 90,
+    TweenSpeed = 48,
     AttackSpeed = 0.15,
-    -- Configurações Quests
-    AutoClaimQuests = true,
-    ClaimDelaySeconds = 8,
+    AutoClaimQuests = false,
     -- Configurações Auto-Sell & Auto-Favorite
     AutoSell = true,
     SellDelaySeconds = 10,
@@ -144,7 +140,7 @@ function ConfigModule.Load()
 end
 ConfigModule.Load()
 
--- [[ 3. MÓDULO DE PERSONAGEM & FÍSICA SEGURA ]]
+-- [[ 3. MÓDULO DE PERSONAGEM & FÍSICA ]]
 local CharacterModule = {}
 local diedConnection = nil
 local charConnection = nil
@@ -158,47 +154,14 @@ function CharacterModule.Get()
     return nil, nil, nil
 end
 
-local function cleanFlightBodies(root)
-    if not root then return end
-    local bv = root:FindFirstChild("HubFlightForce")
-    if bv then bv:Destroy() end
-    local bg = root:FindFirstChild("HubFlightGyro")
-    if bg then bg:Destroy() end
-end
-
-local function getFlightBody(root)
-    local bv = root:FindFirstChild("HubFlightForce")
-    if not bv then
-        bv = Instance.new("BodyVelocity")
-        bv.Name = "HubFlightForce"
-        bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-        bv.Velocity = Vector3.zero
-        bv.Parent = root
-    end
-
-    local bg = root:FindFirstChild("HubFlightGyro")
-    if not bg then
-        bg = Instance.new("BodyGyro")
-        bg.Name = "HubFlightGyro"
-        bg.MaxTorque = Vector3.new(4e5, 4e5, 4e5)
-        bg.P = 25000
-        bg.D = 50
-        bg.Parent = root
-    end
-
-    return bv, bg
-end
-
 function CharacterModule.StopMovement()
     if SharedState.CurrentTween then
         SharedState.CurrentTween:Cancel()
         SharedState.CurrentTween = nil
     end
     SharedState.CurrentTargetPos = nil
-    
     local _, root = CharacterModule.Get()
-    if root then
-        cleanFlightBodies(root)
+    if root and root.Parent then
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
     end
@@ -212,32 +175,55 @@ function CharacterModule.ApplyPhysicsStabilizers(char)
         hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
         hum:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
     end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if root then
+        root.CanCollide = false
+    end
 end
 
 flightStabilizer = RunService.Stepped:Connect(function()
     if SharedState.IsRunning and ConfigModule.Settings.AutoFarm and not SharedState.IsRespawning and not SharedState.EnteringPortal and not SharedState.IsTransitioning then
-        local char, root, hum = CharacterModule.Get()
-        if char and root and hum and hum.Health > 0 then
-            for _, part in ipairs(char:GetChildren()) do
-                if part:IsA("BasePart") and part.CanCollide then
-                    part.CanCollide = false
-                end
+        local _, root, hum = CharacterModule.Get()
+        if root and hum and hum.Health > 0 then
+            if not SharedState.CurrentTween then
+                root.AssemblyLinearVelocity = Vector3.new(0, 0.05, 0)
+                root.AssemblyAngularVelocity = Vector3.zero
+            else
+                root.AssemblyAngularVelocity = Vector3.zero
             end
         end
     end
 end)
 
-function CharacterModule.FlyToEnemy(targetPart)
-    if SharedState.IsDungeonEnded or SharedState.IsRespawning or SharedState.IsTransitioning or SharedState.EnteringPortal or not SharedState.IsRunning then 
-        CharacterModule.StopMovement()
-        return 
+function CharacterModule.GetSafeCFrame(targetPosition, lookAtPosition)
+    local char = player.Character
+    local rayOrigin = targetPosition + Vector3.new(0, 20, 0)
+    local rayDirection = Vector3.new(0, -50, 0)
+    
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    if char then
+        params.FilterDescendantsInstances = {char}
     end
     
-    local _, root, hum = CharacterModule.Get()
-    if not root or not hum or not targetPart or not targetPart.Parent then 
-        CharacterModule.StopMovement()
-        return 
+    local hit = workspace:Raycast(rayOrigin, rayDirection, params)
+    local safeY = targetPosition.Y
+
+    if hit then
+        local floorY = hit.Position.Y
+        if safeY < (floorY + 3.5) then
+            safeY = floorY + 3.5
+        end
     end
+
+    local safePos = Vector3.new(targetPosition.X, safeY, targetPosition.Z)
+    return CFrame.new(safePos, lookAtPosition)
+end
+
+function CharacterModule.FlyToEnemy(targetPart)
+    if SharedState.IsDungeonEnded or SharedState.IsRespawning or SharedState.IsTransitioning or SharedState.EnteringPortal or not SharedState.IsRunning then return end
+    local _, root = CharacterModule.Get()
+    if not root or not targetPart or not targetPart.Parent then return end
 
     local enemyPos = targetPart.Position
     if enemyPos.Magnitude > 20000 or enemyPos.Y > 500 or enemyPos.Y < -800 then
@@ -246,43 +232,49 @@ function CharacterModule.FlyToEnemy(targetPart)
     end
 
     local mode = ConfigModule.Settings.PositionMode
-    local targetPos, targetCFrame
+    local targetCFrame
 
     if mode == "Em Cima da Cabeça" then
-        targetPos = Vector3.new(enemyPos.X, enemyPos.Y + ConfigModule.Settings.HeightAboveEnemy, enemyPos.Z)
-        -- Inclina 90 graus para baixo olhando diretamente para o inimigo
-        targetCFrame = CFrame.lookAt(targetPos, enemyPos) * CFrame.Angles(math.rad(-90), 0, 0)
+        local abovePos = enemyPos + Vector3.new(0, ConfigModule.Settings.HeightAboveEnemy, 0.1)
+        targetCFrame = CFrame.lookAt(abovePos, enemyPos)
     elseif mode == "Nas Costas" then
-        -- Calcula o ponto exatamente nas costas usando a matriz de transformação do próprio monstro
-        local backOffset = targetPart.CFrame * CFrame.new(0, 1.5, ConfigModule.Settings.BackDistance)
-        targetPos = backOffset.Position
-        -- Mira direto no centro do mob
-        targetCFrame = CFrame.lookAt(targetPos, enemyPos)
+        local lookVec = targetPart.CFrame.LookVector
+        if lookVec.Magnitude > 0.1 then
+            local backOffset = -lookVec * ConfigModule.Settings.BackDistance + Vector3.new(0, 2.5, 0)
+            local backPos = enemyPos + backOffset
+            targetCFrame = CFrame.lookAt(backPos, enemyPos)
+        else
+            targetCFrame = CFrame.lookAt(enemyPos + Vector3.new(0, 5, 5), enemyPos)
+        end
     else
-        targetPos = enemyPos + Vector3.new(0, ConfigModule.Settings.HeightAboveEnemy, 0)
-        targetCFrame = CFrame.lookAt(targetPos, enemyPos)
+        local abovePos = enemyPos + Vector3.new(0, ConfigModule.Settings.HeightAboveEnemy, 0)
+        targetCFrame = CharacterModule.GetSafeCFrame(abovePos, enemyPos)
     end
 
-    local bv, bg = getFlightBody(root)
-    local diff = targetPos - root.Position
-    local dist = diff.Magnitude
+    local targetPos = targetCFrame.Position
+    local distance = (root.Position - targetPos).Magnitude
 
-    bg.CFrame = targetCFrame
+    if distance <= 1.2 then return end
 
-    if dist <= 1.2 then
-        bv.Velocity = Vector3.new(0, 0.05, 0)
-    else
-        local speed = math.clamp(ConfigModule.Settings.TweenSpeed, 25, 120)
-        bv.Velocity = diff.Unit * math.clamp(dist * 9, 20, speed)
+    if SharedState.CurrentTargetPos and (SharedState.CurrentTargetPos - targetPos).Magnitude < 1.8 and SharedState.CurrentTween then
+        return
     end
+
+    SharedState.CurrentTargetPos = targetPos
+    local duration = math.clamp(distance / math.max(ConfigModule.Settings.TweenSpeed, 10), 0.08, 3.5)
+
+    if SharedState.CurrentTween then 
+        SharedState.CurrentTween:Cancel() 
+    end
+
+    SharedState.CurrentTween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {CFrame = targetCFrame})
+    SharedState.CurrentTween:Play()
 end
 
 function CharacterModule.FlyToPortal(targetCFrame)
     if SharedState.IsDungeonEnded or SharedState.IsRespawning or SharedState.IsTransitioning or not SharedState.IsRunning then return end
     local _, root = CharacterModule.Get()
     if not root or not root.Parent then return end
-
-    cleanFlightBodies(root)
 
     local targetPos = targetCFrame.Position
     local distance = (root.Position - targetPos).Magnitude
@@ -299,18 +291,11 @@ end
 function CharacterModule.TriggerButton(btn)
     if not btn or not SharedState.IsRunning then return end
     pcall(function()
-        if getconnections then
-            for _, evName in ipairs({"Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up"}) do
-                if btn[evName] then
-                    for _, c in ipairs(getconnections(btn[evName])) do c:Fire() end
-                end
+        for _, evName in ipairs({"Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up"}) do
+            if btn[evName] and firesignal then firesignal(btn[evName]) end
+            if btn[evName] and getconnections then
+                for _, c in ipairs(getconnections(btn[evName])) do c:Fire() end
             end
-        end
-        if firesignal then
-            if btn.Activated then firesignal(btn.Activated) end
-            if btn.MouseButton1Click then firesignal(btn.MouseButton1Click) end
-            if btn.MouseButton1Down then firesignal(btn.MouseButton1Down) end
-            if btn.MouseButton1Up then firesignal(btn.MouseButton1Up) end
         end
     end)
 end
@@ -420,47 +405,22 @@ function TargetingModule.GetClosestEnemy(phase)
     return closestEnemy, closestPart
 end
 
--- [[ 5. MÓDULO DE COMBATE & DETECÇÃO DE ARMA ]]
+-- [[ 5. MÓDULO DE COMBATE ]]
 local CombatModule = {}
 local attackRemote = ReplicatedStorage:WaitForChild("Remotes", 10):WaitForChild("Attack", 10)
 local lastSkillUse = 0
 local comboIndex = 1
 
-function CombatModule.DetectEquippedWeapon()
-    local main = pgui:FindFirstChild("Main")
-    local mainFrame = main and main:FindFirstChild("MainFrame")
-    local itemsFrame = mainFrame and mainFrame:FindFirstChild("Items")
-    
-    if itemsFrame then
-        local weaponSlot = itemsFrame:FindFirstChild("Weapon", true) or itemsFrame:FindFirstChild("WeaponSlot", true)
-        if weaponSlot then
-            local itemVal = weaponSlot:FindFirstChild("Item")
-            if itemVal and itemVal:IsA("ObjectValue") and itemVal.Value then
-                return itemVal.Value.Name
-            end
-            local title = weaponSlot:FindFirstChild("Title")
-            if title and title:IsA("TextLabel") and title.Text ~= "" and title.Text ~= "Empty" then
-                return title.Text
-            end
-        end
-    end
-
-    local scroll = itemsFrame and itemsFrame:FindFirstChild("Scroll")
-    if scroll then
-        for _, slot in ipairs(scroll:GetChildren()) do
-            if (slot:IsA("ImageButton") or slot:IsA("Frame")) and slot:FindFirstChild("Item") and slot.Item:IsA("ObjectValue") then
-                local itemObj = slot.Item.Value
-                if itemObj and itemObj.Parent then
-                    local isEquipped = itemObj:GetAttribute("Equipped") == true
-                    local itemType = tostring(itemObj:GetAttribute("Type") or ""):lower()
-                    local eqVisual = slot:FindFirstChild("EquippedSelection")
-                    local isVisuallyEquipped = eqVisual and eqVisual:IsA("GuiObject") and eqVisual.Visible
-
-                    local nameLower = itemObj.Name:lower()
-                    local isArmor = itemType:find("armor") or nameLower:find("mask") or nameLower:find("ring") or nameLower:find("necklace") or nameLower:find("hat") or nameLower:find("cape")
-
-                    if (isEquipped or isVisuallyEquipped) and (itemType == "weapon" or not isArmor) then
-                        return itemObj.Name
+function CombatModule.DetectWeapon()
+    local pguiRef = player:FindFirstChild("PlayerGui")
+    if pguiRef then
+        for _, desc in ipairs(pguiRef:GetDescendants()) do
+            if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and desc.Visible then
+                local txt = desc.Text:lower()
+                if txt:find("unequip") or txt:find("desequipar") or txt:find("equipped") then
+                    local parentSlot = desc:FindFirstAncestorWhichIsA("Frame") or desc:FindFirstAncestorWhichIsA("ImageLabel") or desc.Parent
+                    if parentSlot and parentSlot.Name ~= "Items" and parentSlot.Name ~= "Scroll" then
+                        return parentSlot.Name
                     end
                 end
             end
@@ -468,25 +428,17 @@ function CombatModule.DetectEquippedWeapon()
     end
 
     local char = player.Character
-    if char then
-        local tool = char:FindFirstChildOfClass("Tool")
-        if tool and not tool.Name:lower():find("armor") then return tool.Name end
-    end
-
+    if char and char:FindFirstChildOfClass("Tool") then return char:FindFirstChildOfClass("Tool").Name end
     local bp = player:FindFirstChild("Backpack")
-    if bp then
-        local tool = bp:FindFirstChildOfClass("Tool")
-        if tool and not tool.Name:lower():find("armor") then return tool.Name end
-    end
-
-    return "VoidRods"
+    if bp and bp:FindFirstChildOfClass("Tool") then return bp:FindFirstChildOfClass("Tool").Name end
+    return nil
 end
 
 function CombatModule.GetEffectiveWeapon()
     if ConfigModule.Settings.CustomWeaponName and ConfigModule.Settings.CustomWeaponName ~= "" then
         return ConfigModule.Settings.CustomWeaponName
     end
-    return CombatModule.DetectEquippedWeapon()
+    return CombatModule.DetectWeapon() or "VoidRods"
 end
 
 function CombatModule.GetHotbar()
@@ -503,20 +455,10 @@ function CombatModule.ExecuteM1()
     if SharedState.IsDungeonEnded or SharedState.IsRespawning or SharedState.IsTransitioning or SharedState.EnteringPortal or not SharedState.IsRunning then return end
     comboIndex = (comboIndex % 4) + 1
     local weapon = CombatModule.GetEffectiveWeapon()
-    
-    if attackRemote then
-        pcall(function()
-            attackRemote:FireServer("M1", weapon, comboIndex, 0, 0, 2)
-        end)
-    end
+    if attackRemote then pcall(function() attackRemote:FireServer("M1", weapon, comboIndex, 0, 0, 2) end) end
 
     local char = player.Character
-    if char then
-        local tool = char:FindFirstChildOfClass("Tool")
-        if tool then
-            pcall(function() tool:Activate() end)
-        end
-    end
+    if char and char:FindFirstChildOfClass("Tool") then pcall(function() char:FindFirstChildOfClass("Tool"):Activate() end) end
 end
 
 function CombatModule.ExecuteSkills()
@@ -696,66 +638,53 @@ function AutoSellModule.Execute()
     SharedState.IsSelling = false
 end
 
--- [[ 7. MÓDULO DE QUESTS (PRECISÃO DE CONTAGEM & SILENCIOSO) ]]
+-- [[ 7. MÓDULO DE MISSÕES ]]
 local QuestModule = {}
-local lastQuestTick = 0
+local questRemote = ReplicatedStorage:WaitForChild("Remotes", 10):WaitForChild("Quest", 10)
 
 function QuestModule.ClaimAll()
     if not ConfigModule.Settings.AutoClaimQuests or SharedState.IsClaiming or not SharedState.IsRunning then return end
-    if (tick() - lastQuestTick) < 6 then return end
-
-    SharedState.IsClaiming = true
-    lastQuestTick = tick()
-
-    local main = pgui and pgui:FindFirstChild("Main")
+    local main = pgui:FindFirstChild("Main")
     local mainFrame = main and main:FindFirstChild("MainFrame")
     local questsFrame = mainFrame and mainFrame:FindFirstChild("Quests")
     local questsHolder = questsFrame and questsFrame:FindFirstChild("QuestsHolder")
     local claimBtn = questsFrame and questsFrame:FindFirstChild("Information") and questsFrame.Information:FindFirstChild("Claim")
-    local buttonsFolder = questsFrame and questsFrame:FindFirstChild("Buttons")
+    if not questsFrame or not questsHolder or not claimBtn then return end
 
-    if not questsFrame or not questsHolder or not buttonsFolder then
-        SharedState.IsClaiming = false
-        return
-    end
-
+    SharedState.IsClaiming = true
     local originalVisible = questsFrame.Visible
     questsFrame.Visible = false
 
     local tabs = {
-        buttonsFolder:FindFirstChild("Hourly"),
-        buttonsFolder:FindFirstChild("Daily"),
-        buttonsFolder:FindFirstChild("Weekly")
+        questsFrame:FindFirstChild("Buttons") and questsFrame.Buttons:FindFirstChild("Hourly"),
+        questsFrame:FindFirstChild("Buttons") and questsFrame.Buttons:FindFirstChild("Daily"),
+        questsFrame:FindFirstChild("Buttons") and questsFrame.Buttons:FindFirstChild("Weekly")
     }
 
-    local claimedCount = 0
-    local claimedSlots = {}
-
-    for _, tabBtn in ipairs(tabs) do
-        if tabBtn then
-            CharacterModule.TriggerButton(tabBtn)
-            task.wait(0.25)
-
+    local claimed = 0
+    for _, tab in ipairs(tabs) do
+        if tab then
+            CharacterModule.TriggerButton(tab)
+            task.wait(0.12)
             for _, slot in ipairs(questsHolder:GetChildren()) do
-                if (slot:IsA("ImageButton") or slot:IsA("GuiButton")) and not claimedSlots[slot] then
-                    local progressLabel = slot:FindFirstChild("QuestProgress", true)
-                    if progressLabel and progressLabel:IsA("TextLabel") then
-                        local txt = progressLabel.Text:lower()
-                        
-                        local alreadyClaimed = txt:find("claimed") or txt:find("resgatado") or txt:find("coletado")
-                        local isReadyToClaim = (txt:find("claim") or txt:find("resgatar") or txt:find("completed") or txt:find("concluído")) and not alreadyClaimed
-
-                        if isReadyToClaim then
-                            claimedSlots[slot] = true
+                if slot:IsA("GuiButton") then
+                    local pLabel = slot:FindFirstChild("QuestProgress", true)
+                    if pLabel and pLabel:IsA("TextLabel") then
+                        local txt = pLabel.Text:lower()
+                        if txt == "claim" or txt == "resgatar" or txt == "completed" then
                             CharacterModule.TriggerButton(slot)
                             task.wait(0.1)
-
-                            if claimBtn then
-                                CharacterModule.TriggerButton(claimBtn)
+                            CharacterModule.TriggerButton(claimBtn)
+                            if questRemote then
+                                pcall(function()
+                                    questRemote:FireServer("Claim", slot.Name)
+                                    questRemote:FireServer(slot.Name)
+                                    local num = tonumber(slot.Name:match("%d+"))
+                                    if num then questRemote:FireServer(num) end
+                                end)
                             end
-
-                            claimedCount = claimedCount + 1
-                            task.wait(0.15)
+                            claimed = claimed + 1
+                            task.wait(0.12)
                         end
                     end
                 end
@@ -764,19 +693,13 @@ function QuestModule.ClaimAll()
     end
 
     questsFrame.Visible = originalVisible
-
-    if claimedCount > 0 then
-        Fluent:Notify({
-            Title = "Quests Concluídas",
-            Content = string.format("%d missões resgatadas com sucesso!", claimedCount),
-            Duration = 3.5
-        })
+    if claimed > 0 then
+        Fluent:Notify({ Title = "Quests Resgatadas", Content = string.format("%d missões coletadas!", claimed), Duration = 3.5 })
     end
-
     SharedState.IsClaiming = false
 end
 
--- [[ 8. MÓDULO DE FLUXO & PORTAIS ]]
+-- [[ 8. MÓDULO DE FLUXO & PORTAIS COM PAUSA DE SERVIDOR ]]
 local FlowModule = {}
 
 local BLEACH_PORTAL_1 = CFrame.new(4557.2, -305.5, 1925.0)
@@ -1107,16 +1030,15 @@ task.spawn(function()
                 if not initialRoutinesScheduled then
                     initialRoutinesScheduled = true
                     
-                    -- Auto-Claim Quests (Execução única silenciosa no tempo configurado)
+                    -- Rotina de Auto-Claim Quests
                     task.spawn(function()
-                        task.wait(ConfigModule.Settings.ClaimDelaySeconds)
-                        if SharedState.IsRunning and not SharedState.IsDungeonEnded and not SharedState.HasExecutedQuests and ConfigModule.Settings.AutoClaimQuests then
-                            SharedState.HasExecutedQuests = true
+                        task.wait(13)
+                        if SharedState.IsRunning and ConfigModule.Settings.AutoClaimQuests and not SharedState.IsDungeonEnded then
                             QuestModule.ClaimAll()
                         end
                     end)
 
-                    -- Auto-Sell e Auto-Favorite (Execução única no tempo configurado)
+                    -- Rotina de Auto-Sell e Auto-Favorite (Execução única no início da dungeon)
                     task.spawn(function()
                         task.wait(ConfigModule.Settings.SellDelaySeconds)
                         if SharedState.IsRunning and not SharedState.IsDungeonEnded and not SharedState.HasExecutedSell then
@@ -1138,6 +1060,11 @@ task.spawn(function()
                     SharedState.IsDungeonEnded = true
                     SharedState.IsVirusActive = false
                     CharacterModule.StopMovement()
+
+                    if ConfigModule.Settings.AutoClaimQuests then
+                        pcall(QuestModule.ClaimAll)
+                        task.wait(0.2)
+                    end
 
                     if ConfigModule.Settings.AutoEngage and DungeonStateModule.CheckEngage() then
                         SharedState.IsDungeonEnded = false
@@ -1270,7 +1197,7 @@ task.spawn(function()
     end
 end)
 
--- ABA FARM
+-- Componentes da UI (Aba Farm)
 local PhaseSection = Tabs.Farm:AddSection("Configurações de Fase & Posição")
 PhaseSection:AddDropdown("PhaseSelector", {
     Title = "Selecionar Fase",
@@ -1288,7 +1215,7 @@ PhaseSection:AddDropdown("PositionModeSelector", {
 
 local WeaponSection = Tabs.Farm:AddSection("Configuração de Arma")
 local WeaponInput = WeaponSection:AddInput("WeaponInputBox", {
-    Title = "Arma Equipada",
+    Title = "Arma Equipada / Nome",
     Default = ConfigModule.Settings.CustomWeaponName,
     Placeholder = "Ex: VoidRods, Katana...",
     Finished = true,
@@ -1296,17 +1223,17 @@ local WeaponInput = WeaponSection:AddInput("WeaponInputBox", {
 })
 
 WeaponSection:AddButton({
-    Title = "🔍 Detectar Arma",
-    Description = "Lê e exibe o nome da arma equipada no momento",
+    Title = "🔍 Detectar Arma da Mão",
+    Description = "Lê automaticamente o nome da arma equipada",
     Callback = function()
-        local detected = CombatModule.DetectEquippedWeapon()
+        local detected = CombatModule.DetectWeapon()
         if detected and detected ~= "" then
             ConfigModule.Settings.CustomWeaponName = detected
             WeaponInput:SetValue(detected)
             ConfigModule.Save()
-            Fluent:Notify({ Title = "Arma Detectada", Content = "Equipada: " .. tostring(detected), Duration = 4 })
+            Fluent:Notify({ Title = "Arma Detectada", Content = "Identificada: " .. tostring(detected), Duration = 4 })
         else
-            Fluent:Notify({ Title = "Não Encontrada", Content = "Nenhuma arma identificada.", Duration = 4 })
+            Fluent:Notify({ Title = "Não Encontrada", Content = "Digite o nome exato da arma.", Duration = 4 })
         end
     end
 })
@@ -1332,7 +1259,7 @@ CombatSection:AddSlider("BackDistance", {
 CombatSection:AddSlider("TweenSpeed", {
     Title = "Velocidade do Voo",
     Default = ConfigModule.Settings.TweenSpeed,
-    Min = 20, Max = 120, Rounding = 0,
+    Min = 20, Max = 90, Rounding = 0,
     Callback = function(Value) ConfigModule.Settings.TweenSpeed = Value ConfigModule.Save() end
 })
 CombatSection:AddToggle("HardcoreToggle", {
@@ -1391,7 +1318,7 @@ CombatSection:AddSlider("SkillCooldownSlider", {
     Callback = function(Value) ConfigModule.Settings.SkillCooldown = Value ConfigModule.Save() end
 })
 
--- ABA AUTO-SELL & FAVORITE
+-- Componentes da UI (Aba Auto-Sell & Favorite)
 local FavoriteSection = Tabs.Sell:AddSection("Proteção de Itens (Auto-Favorite)")
 FavoriteSection:AddToggle("AutoFavSecretsToggle", {
     Title = "Auto-Favorite Secretos",
@@ -1458,23 +1385,15 @@ SellRaritiesSection:AddToggle("SellMythicToggle", {
     Callback = function(Value) ConfigModule.Settings.SellMythic = Value ConfigModule.Save() end
 })
 
--- ABA SETTINGS
+-- Componentes da UI (Aba Settings)
 local QuestsSection = Tabs.Settings:AddSection("Automação de Missões (Quests)")
 QuestsSection:AddToggle("AutoClaimQuestsToggle", {
-    Title = "Auto-Claim de Missões",
-    Description = "Resgata automaticamente as missões concluídas em segundo plano",
+    Title = "Auto-Claim de Missões (13s pós-início)",
     Default = ConfigModule.Settings.AutoClaimQuests,
     Callback = function(Value) ConfigModule.Settings.AutoClaimQuests = Value ConfigModule.Save() end
 })
-QuestsSection:AddSlider("ClaimDelaySlider", {
-    Title = "Tempo pós-início para Resgatar (s)",
-    Default = ConfigModule.Settings.ClaimDelaySeconds,
-    Min = 1, Max = 30, Rounding = 0,
-    Callback = function(Value) ConfigModule.Settings.ClaimDelaySeconds = Value ConfigModule.Save() end
-})
 QuestsSection:AddButton({
     Title = "⚡ Resgatar Missões Agora",
-    Description = "Varre Hourly, Daily e Weekly resgatando o que estiver pronto silenciosamente",
     Callback = function() pcall(QuestModule.ClaimAll) end
 })
 
