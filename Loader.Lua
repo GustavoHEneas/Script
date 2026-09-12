@@ -17,7 +17,7 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
-local scriptURL = "https://raw.githubusercontent.com/ErickMBarreto/Scripts/refs/heads/main/Teste.lua"
+local scriptURL = "https://raw.githubusercontent.com/GustavoHEneas/Script/refs/heads/main/Loader.Lua"
 local SCRIPT_NAME = "HubRapazes_Local.lua"
 
 pcall(function()
