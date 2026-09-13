@@ -1,5 +1,5 @@
 -- ====================================================================
--- HUB DOS RAPAZES - ANIME DUNGEONS (SAO: ALCANCE EXPANDIDO & PERSISTÊNCIA ENGAGE)
+-- HUB DOS RAPAZES - ANIME DUNGEONS (TWEEN ESTÁVEL + FILTRO ANTI-BAÚ)
 -- ====================================================================
 
 -- [[ 1. TRAVA GLOBAL SINGLETON & CACHE LOCAL ]]
@@ -103,7 +103,7 @@ ConfigModule.Settings = {
     AutoSkills = true,
     AutoStart = true,
     AutoPlayAgain = true,
-    AutoEngage = false, -- Padrão desligado para respeitar sua vontade
+    AutoEngage = false,
     HardcoreMode = false,
     SkillCooldown = 0.8,
     SkillMaxDistance = 22,
@@ -242,7 +242,7 @@ function WebhookModule.ProcessDungeonDrops()
     end
 end
 
--- [[ 4. PERSONAGEM & FÍSICA ESTÁVEL ]]
+-- [[ 4. PERSONAGEM & FÍSICA ESTÁVEL (TWEEN ESTÁVEL ANTI-BAN) ]]
 local CharacterModule = {}
 local diedConnection = nil
 local charConnection = nil
@@ -374,6 +374,7 @@ function CharacterModule.FlyToEnemy(targetPart, overrideMode)
 
     if distance <= 1.2 then return end
 
+    -- Histerese de 2.0 studs mantida para evitar cancelamentos sucessivos de Tween
     if SharedState.CurrentTargetPos and (SharedState.CurrentTargetPos - targetPos).Magnitude < 2.0 and SharedState.CurrentTween then
         return
     end
@@ -583,25 +584,17 @@ function SAOModule.CheckBonus()
     return false
 end
 
--- [[ 6. DETECÇÃO DE INIMIGOS (ALCANCE AMPLIADO & ANTI-BAÚ) ]]
+-- [[ 6. DETECÇÃO DE INIMIGOS (DETECÇÃO ORIGINAL + FILTRO DE BAÚ) ]]
 local TargetingModule = {}
 
-local IGNORED_NAMES = {
-    "chest", "reward", "crate", "box", "drop", "loot", "portal", "gate",
-    "break", "item", "orb", "coin", "destructible", "stand", "spawn"
-}
-
-function TargetingModule.IsChestOrProp(name)
-    local n = name:lower()
-    for _, pattern in ipairs(IGNORED_NAMES) do
-        if n:find(pattern) then return true end
-    end
-    return false
+local function isChest(objName)
+    local n = objName:lower()
+    return n:find("chest") or n:find("crate") or n:find("reward")
 end
 
 function TargetingModule.IsAlive(obj)
     if not obj or not obj.Parent then return false end
-    if TargetingModule.IsChestOrProp(obj.Name) then return false end
+    if isChest(obj.Name) then return false end -- Descarte cirúrgico do baú
     
     local hum = obj:FindFirstChildOfClass("Humanoid")
     if hum then 
@@ -623,7 +616,7 @@ function TargetingModule.IsAlive(obj)
     return true
 end
 
-function TargetingModule.GetTargetPart(obj, phase)
+function TargetingModule.GetTargetPart(obj)
     if not obj or not obj.Parent then return nil end
     local part = obj:FindFirstChild("HumanoidRootPart")
         or obj:FindFirstChild("RootPart")
@@ -634,20 +627,10 @@ function TargetingModule.GetTargetPart(obj, phase)
         or (obj:IsA("Model") and obj.PrimaryPart)
         or obj:FindFirstChildWhichIsA("BasePart")
     
-    if not part then return nil end
-
-    -- Blindagem para a fase SAO: garante que o alvo esteja dentro dos limites da fase
-    if phase == "SAO" then
-        if part.Position.Y < 940 or part.Position.Y > 1080 then
-            return nil
-        end
-    else
-        if part.Position.Y < -2000 then
-            return nil
-        end
+    if part and part.Position.Y > -2000 then
+        return part
     end
-
-    return part
+    return nil
 end
 
 function TargetingModule.GetLivingEnemies(phase)
@@ -657,7 +640,7 @@ function TargetingModule.GetLivingEnemies(phase)
 
     local function addEntity(mob)
         if mob and mob:IsA("Model") and mob ~= char and not registered[mob] and not Players:GetPlayerFromCharacter(mob) then
-            if not TargetingModule.IsChestOrProp(mob.Name) and TargetingModule.IsAlive(mob) and TargetingModule.GetTargetPart(mob, phase) then
+            if TargetingModule.IsAlive(mob) and TargetingModule.GetTargetPart(mob) then
                 registered[mob] = true
                 table.insert(list, mob)
             end
@@ -687,6 +670,16 @@ function TargetingModule.GetLivingEnemies(phase)
         end
     end
 
+    if #list == 0 and gameFolder then
+        for _, desc in ipairs(gameFolder:GetDescendants()) do
+            if desc:IsA("Model") and desc ~= char and not Players:GetPlayerFromCharacter(desc) then
+                if desc.Name ~= "Clothing" and not desc:FindFirstAncestor("Players") then
+                    addEntity(desc)
+                end
+            end
+        end
+    end
+
     return list
 end
 
@@ -696,11 +689,10 @@ function TargetingModule.GetClosestEnemy(phase)
 
     local enemies = TargetingModule.GetLivingEnemies(phase)
     local closestEnemy, closestPart = nil, nil
-    -- Alcance ajustado para 450 studs para não deixar mobs distantes de fora
-    local minDistance = (phase == "SAO") and 450 or 350
+    local minDistance = math.huge -- Sem restrição de distância
 
     for _, enemy in ipairs(enemies) do
-        local targetPart = TargetingModule.GetTargetPart(enemy, phase)
+        local targetPart = TargetingModule.GetTargetPart(enemy)
         if targetPart and targetPart:IsA("BasePart") then
             local dist = (root.Position - targetPart.Position).Magnitude
             if dist < minDistance then
@@ -1056,7 +1048,7 @@ function FlowModule.PassPortal(targetCFrame, onCompleteCallback)
     end
 end
 
--- ROTA DO SAO: VARREDURA AMPLIADA E ZERO RISCO DE BAÚ
+-- ROTA DO SAO LIMPA E DIRETA
 function FlowModule.RunSAO()
     local _, root = CharacterModule.Get()
     if not root then return end
@@ -1089,7 +1081,7 @@ function FlowModule.RunSAO()
 
     local wave = FlowModule.GetWave()
 
-    -- 3. VERIFICAÇÃO DE INIMIGOS VIVOS (ALCANCE ATÉ 450 STUDS):
+    -- 3. PRIORIDADE: SE EXISTIR INIMIGO NO MAPA, ATACA IMEDIATAMENTE
     local currentMob, mobPart = TargetingModule.GetClosestEnemy("SAO")
     if currentMob and mobPart then
         if wave >= 16 then
@@ -1100,7 +1092,7 @@ function FlowModule.RunSAO()
         return
     end
 
-    -- 4. TRANSIÇÃO DE PORTAIS (APENAS QUANDO A SALA ESTIVER LIMPA):
+    -- 4. TRANSIÇÃO DE PORTAIS (SOMENTE SE NÃO RESTAR NENHUM MONSTRO)
     if wave >= 16 and not SharedState.HasEnteredBossRoom then
         local distToP2 = (root.Position - SAO_PORTAL_2.Position).Magnitude
         if distToP2 < 300 and distToP2 > 3.0 then
@@ -1123,7 +1115,7 @@ function FlowModule.RunSAO()
         end
     end
 
-    -- 5. STANDBY ESTÁTICO SE A SALA ESTIVER VAZIA:
+    -- 5. STANDBY SE NÃO HOUVER MONSTROS
     SharedState.HasTarget = false
     CharacterModule.StopMovement()
 end
@@ -1752,7 +1744,7 @@ CombatSection:AddToggle("AutoEngageToggle", {
     Default = ConfigModule.Settings.AutoEngage,
     Callback = function(Value) 
         ConfigModule.Settings.AutoEngage = Value 
-        ConfigModule.Save() -- Salva no disco permanentemente
+        ConfigModule.Save()
     end
 })
 CombatSection:AddToggle("AutoPlayAgainToggle", {
